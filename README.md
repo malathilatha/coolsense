@@ -1,83 +1,96 @@
-# CoolSense: an AC that notices its own fault and explains it in your language
+# ❄️ CoolSense: the AC that tells you what's wrong
 
-A small box beside an air-conditioning unit learns what *healthy* looks like for
-that unit, notices when it drifts, names the likely fault, and tells the
-resident or shop owner what is happening in their language. A technician gets a
-job card with what to bring. Everything runs locally.
+**Code detects → TabPFN diagnoses → Gemma explains.** All open models, all on one laptop, no cloud.
 
-- **Detect:** a healthy-behaviour model per unit turns every reading into a z-score
-  ("how far from this unit's normal"). Units, sizes and sensors no longer matter.
-- **Diagnose:** TabPFN classifies the fault from the z-scores (gradient boosting as a baseline).
-- **Explain:** Gemma, running locally, writes the message. It never chooses the fault or the numbers.
+When an AC fails, a technician usually visits once to find the fault and again with the parts.
+CoolSense watches the unit's own sensor readings, names the likely fault, writes the owner a plain
+message in their language, and gives the technician a job card with **what to bring**, so the first
+visit can fix it.
 
-Data: **real** LBNL rooftop-unit fault data (CC BY 4.0, DOI 10.25984/1881324):
-a simulated R410A unit with 6 fault types at several severities, and a **real
-field unit in Colchester, CT** with a documented 40% refrigerant undercharge.
+**Who pays:** AC maintenance companies and facility managers (per AC, per month). They get a
+priority list of which units need a visit, what's probably wrong, and what to put in the van.
 
-## Files
+![How it works](docs/how_it_works.png)
+
+Built for the [DEV Hacktoberfest Open-Source AI Challenge, Week 2: Side Hustle](https://dev.to/challenges/hacktoberfest-week2-2026-10-12).
+
+## Demo
+
+| Live AC (owner + technician) | Maintenance company (B2B) |
+|---|---|
+| ![Live view](docs/live_view.png) | ![B2B view](docs/b2b_view.png) |
+
+The app **replays real recordings** from a rooftop AC with a documented 40% refrigerant leak, as if
+they were arriving live. It is not connected to a live unit yet.
+
+## How it works
+
+1. **Detect:** for each unit, a gradient-boosting model learns what every sensor *should* read given
+   the weather and load. Each reading becomes a z-score ("how far from this unit's normal"), so the
+   next step doesn't depend on unit size or sensor brand.
+2. **Diagnose (TabPFN):** classifies flagged readings from labelled examples given as context, with
+   no training step. A technician's confirmation can be added as extra examples straight away.
+3. **Explain (Gemma via Ollama):** `gemma3:4b` writes the owner's message in Arabic, Hindi, Tamil,
+   Malayalam, Urdu, Tagalog or English (JSON schema, script check and retry, English template fallback).
+   **Gemma never chooses the fault or the numbers.** The technician's job card comes from a fixed
+   knowledge base in code.
+
+## Results on the real AC (LBNL field unit, Colchester, CT)
+
+| Circuit / period | Days flagged |
+|---|---|
+| B, June 2020, documented leak (replayed days) | **11 / 15** |
+| A, summer 2021, healthy | **2 / 109** |
+| B, summer 2021, *labelled unfaulted* | **53 / 53** (see below) |
+
+- **Simulation alone isn't enough.** Trained only on simulated faults, both TabPFN and gradient
+  boosting called the real leak a *blocked liquid line* (the readings look alike). After adding
+  **2 technician-confirmed days** (31 rows) to TabPFN's context, it named **98%** of the flagged
+  readings in the replay *low refrigerant*. In the smaller benchmark run (100 examples per fault),
+  that was 69% for TabPFN vs 53% for gradient boosting.
+- **Circuit B in 2021** is labelled unfaulted, but its suction pressure is about 4.2 bar vs 5.4 bar
+  after the 2020 fix, and its discharge temperature is about 93 °C vs 76 °C: the same direction as the
+  leak, about half as far. It looks like the leak came back. This is a **hypothesis**; there are no
+  service records to confirm it.
+- **Simulated unit, unseen weeks:** 2% false alarms; diagnosis macro-F1 0.53 for gradient boosting
+  vs 0.31 for hand-written rules. TabPFN was on par, not clearly better (0.55), and took 237 s vs 2 s on CPU.
+
+Full tables, including the alarm-level sweep, are in [`results/rtu_metrics.md`](results/rtu_metrics.md).
+
+## Run it
+
+1. Download the **LBNL FDD Data Sets, RTU** (CC BY 4.0, DOI
+   [10.25984/1881324](https://doi.org/10.25984/1881324)) and unzip it into `lbnl/`, so that
+   `lbnl/Simulated RTU/RTU_sim_baseline.csv` and `lbnl/Field RTU/Site2_Unfaulted.csv` exist.
+2. Install [Ollama](https://ollama.com) and pull the model: `ollama pull gemma3:4b`
+3. Then:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Windows  (macOS/Linux: source .venv/bin/activate)
+python -m pip install -r requirements.txt
+python rtu_eval.py --no-tabpfn  # builds models/ (~1 min); drop --no-tabpfn to include TabPFN (slow on CPU)
+python -m streamlit run app.py
+```
 
 | File | What it does |
 |---|---|
-| `rtu_data.py` | Loads LBNL simulated + field data into 10-minute windows while the compressor runs |
-| `baseline.py` | Healthy-behaviour model and z-scores; anomaly score; plain-language evidence |
-| `rtu_eval.py` | All experiments; writes `results/rtu_metrics.md` |
-| `explain.py` | Gemma message + knowledge-base job card |
-| `app.py` | Live Streamlit replay of 4 streams |
+| `rtu_data.py` | Loads LBNL simulated and field data into 10-minute windows while the compressor runs |
+| `baseline.py` | Per-unit healthy model, z-scores, anomaly score, plain-language evidence |
+| `rtu_eval.py` | All experiments; writes `results/rtu_metrics.md` and `models/` |
+| `explain.py` | Gemma message plus knowledge-base job card |
+| `app.py` | Streamlit demo: live replay plus the maintenance-company view |
 
-## Run it (Windows, PowerShell)
+## Limitations
 
-```powershell
-cd coolsense
-# put the LBNL RTU zip contents here, so these folders exist:
-#   lbnl\Simulated RTU\RTU_sim_baseline.csv ...
-#   lbnl\Field RTU\Site2_Unfaulted.csv ...
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt     # tabpfn pulls in PyTorch (large)
-ollama pull gemma3:1b
+- **A replay, not a live unit.** The next step is reading the same table from a building
+  management system export (BACnet/Modbus) or clip-on pressure and temperature sensors.
+- **The field alarm level (5) is a choice;** the healthy baseline is short. See the sweep in the results.
+- **TabPFN is slow on CPU,** so it runs only on flagged windows. The B2B fleet scan uses the fast
+  gradient-boosting model on the same examples.
+- **Licensing:** newer TabPFN weights are under a non-commercial licence. A paid product needs
+  Prior Labs' commercial terms or the gradient-boosting fallback. Gemma's terms allow commercial use.
 
-python rtu_eval.py                  # ~1 min without TabPFN, longer with it on CPU
-streamlit run app.py
-```
+## License
 
-`python rtu_eval.py --no-tabpfn` runs without TabPFN if it fails to install.
-
-## Results so far (gradient boosting; TabPFN row comes from your laptop run)
-
-**Real unit, no retraining on it.** Alarm when the daily median anomaly > 5:
-
-| Circuit | Period | Days alarmed |
-|---|---|---|
-| B | June 2020, documented 40% undercharge | 12 / 16 (16/16 at level 3) |
-| A | Summer 2021, healthy | 2 / 109 |
-| B | Summer 2021, dataset says unfaulted | **53 / 53** |
-
-**Diagnosis on the real fault:**
-- Trained on simulation only, it calls the real undercharge a *blocked liquid
-  line*. Both starve the indoor coil, so the readings look alike. The job card
-  tells the technician the one measurement that separates them (subcooling).
-- Add 2 technician-confirmed days of the real fault as extra context, and 95% of
-  circuit B's 2021 alarm windows are called *low refrigerant*.
-
-**Simulated unit, later weeks:** 2.6% false alarms. Low indoor airflow and
-suction-line restriction (3 bar+) are diagnosed almost every time; dirty
-condenser at 30–50% in 78–98% of windows; liquid-line blockage at 8–10 bar in
-69–93%. Mild faults, and the simulated over/undercharge (which barely move the
-readings in this model), mostly go unnoticed at this alarm level.
-
-## Findings to state carefully
-
-- **Circuit B in 2021.** The dataset labels it unfaulted, but its suction pressure
-  is 4.2 bar vs 5.4 bar after the 2020 fix, and discharge temperature is about
-  93 °C vs 76 °C: the same direction as the documented undercharge, about half as
-  far. It *looks like* the leak came back after a top-up. That is a hypothesis;
-  there are no service records to confirm it.
-- **Simulation vs reality.** In the simulated unit, undercharge barely moves suction
-  pressure; in the real unit it drops sharply. Training only on simulation is not
-  enough, which is why the few-shot step matters.
-- **Field healthy baseline is short** (Aug–Sep 2020). A year later a healthy circuit
-  drifts 2–4x its normal variation, so the field alarm level is 5. The threshold
-  sweep is in `results/rtu_metrics.md`.
-- **Hardware:** the demo replays recorded data. A real product needs pressure and
-  temperature sensors on the unit (common on commercial units, add-on for homes).
-- **Licensing:** check TabPFN's licence before selling. Gemma's terms allow commercial use.
+Code: MIT (see `LICENSE`). Data: LBNL FDD Data Sets, CC BY 4.0, not included in this repo.
